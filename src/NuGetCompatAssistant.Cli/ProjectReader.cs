@@ -13,15 +13,49 @@ public class ProjectReader
     public static string FindCsprojInDirectory(string? directory = null)
     {
         var dir = directory ?? Directory.GetCurrentDirectory();
+        
+        // Search current directory first
         var files = Directory.GetFiles(dir, "*.csproj", SearchOption.TopDirectoryOnly);
+        
+        // If not found, search recursively
+        if (files.Length == 0)
+        {
+            files = Directory.GetFiles(dir, "*.csproj", SearchOption.AllDirectories);
+        }
 
         if (files.Length == 0)
-            throw new ProjectReaderException($"No .csproj file found in directory: {dir}");
+            throw new ProjectReaderException(
+                $"No .NET project (.csproj) was found in '{dir}' or any of its subdirectories.\n" +
+                "Please navigate to a project or solution directory, or specify a project path explicitly using the --project <path> option.");
 
-        if (files.Length > 1)
-            Console.WriteLine($"Warning: Multiple .csproj files found. Using '{Path.GetFileName(files[0])}'. Use --project to specify one explicitly.");
+        if (files.Length == 1)
+            return files[0];
 
-        return files[0];
+        if (Console.IsInputRedirected)
+        {
+            throw new ProjectReaderException(
+                $"Multiple .csproj files found in '{dir}', but the console cannot accept input.\n" +
+                "Please specify the project explicitly using the --project <path> option.");
+        }
+
+        Console.WriteLine("Multiple .csproj files found. Please select one:");
+        for (int i = 0; i < files.Length; i++)
+        {
+            var relativePath = Path.GetRelativePath(dir, files[i]);
+            Console.WriteLine($"  [{i + 1}] {relativePath}");
+        }
+        
+        while (true)
+        {
+            Console.Write($"Select a project (1-{files.Length}): ");
+            var input = Console.ReadLine();
+            if (int.TryParse(input, out int choice) && choice >= 1 && choice <= files.Length)
+            {
+                Console.WriteLine();
+                return files[choice - 1];
+            }
+            Console.WriteLine("Invalid selection. Please enter a valid number.");
+        }
     }
 
     /// <summary>

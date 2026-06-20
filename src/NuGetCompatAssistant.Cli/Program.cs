@@ -82,6 +82,12 @@ rootCommand.SetHandler(async (bool report, string? projectPath) =>
 },
 reportOption, projectOption);
 
+bool isVersionQuery = args.Contains("--version");
+if (!isVersionQuery)
+{
+    PrintBanner();
+}
+
 return await rootCommand.InvokeAsync(args);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,8 +101,6 @@ static async Task<int> RunInstallAsync(
     bool yes,
     bool dryRun)
 {
-    PrintBanner();
-
     // 1. Resolve project file
     string csprojPath;
     try
@@ -277,8 +281,6 @@ static async Task<int> CheckSpecificVersionAsync(
 
 static async Task<int> RunReportAsync(string? projectPath)
 {
-    PrintBanner();
-
     string csprojPath;
     try
     {
@@ -404,11 +406,28 @@ static async Task<int> RunReportAsync(string? projectPath)
 
 static void PrintBanner()
 {
+    var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+    var infoVersion = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+        .FirstOrDefault()?.InformationalVersion;
+        
+    var version = infoVersion?.Split('+')[0] ?? assembly.GetName().Version?.ToString(3) ?? "1.0";
+    var title = $"Smart NuGet Compatibility Assistant  v{version}";
+    
+    int totalInnerWidth = 57;
+    int leftPadding = (totalInnerWidth - title.Length) / 2;
+    int rightPadding = totalInnerWidth - title.Length - leftPadding;
+    
+    if (leftPadding < 1) leftPadding = 1;
+    if (rightPadding < 1) rightPadding = 1;
+
+    var paddedTitle = new string(' ', leftPadding) + title + new string(' ', rightPadding);
+
     var prev = Console.ForegroundColor;
     Console.ForegroundColor = ConsoleColor.Cyan;
-    Console.WriteLine("┌─────────────────────────────────────────────────────────┐");
-    Console.WriteLine("│        Smart NuGet Compatibility Assistant  v1.0         │");
-    Console.WriteLine("└─────────────────────────────────────────────────────────┘");
+    Console.WriteLine("┌" + new string('─', totalInnerWidth) + "┐");
+    Console.WriteLine($"│{paddedTitle}│");
+    Console.WriteLine("└" + new string('─', totalInnerWidth) + "┘");
     Console.ForegroundColor = prev;
     Console.WriteLine();
 }
