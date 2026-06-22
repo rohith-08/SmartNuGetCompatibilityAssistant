@@ -22,8 +22,11 @@ cd nuget-compat-assistant
 dotnet pack src/NuGetCompatAssistant.Cli
 dotnet tool install --global --add-source ./nupkg nuget-compat-assistant
 
-# 3. Use it
+# 3. Use it — single package
 nuget-compat-assistant install Microsoft.EntityFrameworkCore --dry-run
+
+# 3b. Or batch install multiple packages at once (v1.1+)
+nuget-compat-assistant install AutoMapper Serilog Microsoft.EntityFrameworkCore --dry-run
 ```
 
 Or run directly without installing:
@@ -69,7 +72,7 @@ nuget-compat-assistant install Microsoft.EntityFrameworkCore
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│        Smart NuGet Compatibility Assistant  v1.0             │
+│        Smart NuGet Compatibility Assistant  v1.1.0           │
 └─────────────────────────────────────────────────────────────┘
 
 Project : MyApi.csproj
@@ -93,19 +96,59 @@ Reason:
 Install this package? [y/N]
 ```
 
+### Batch install multiple packages (v1.1+)
+
+```bash
+nuget-compat-assistant install AutoMapper Serilog Microsoft.EntityFrameworkCore --dry-run
+```
+
+**Sample output:**
+
+```
+Project : SampleApp.csproj
+TFM(s)  : net8.0
+
+Resolving 3 package(s)…
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Package                                  Latest Stable      Recommended        Status                 Reason
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ✔ AutoMapper                              16.1.1             16.1.1             Compatible             Latest stable is compatible
+ ✔ Serilog                                 4.3.1              4.3.1              Compatible             Latest stable is compatible
+ ⚠ Microsoft.EntityFrameworkCore           10.0.9             9.0.17             Downgrade              Latest (10.0.9) incompatible; downgraded
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Dry-run mode — nothing was installed.
+```
+
+When you install without `--dry-run`, you'll be prompted once for all packages:
+
+```
+Install 3 package(s)? (y/n)
+```
+
+Then each package is installed sequentially with progress:
+
+```
+[1/3] Installing AutoMapper 16.1.1...
+[2/3] Installing Serilog 4.3.1...
+[3/3] Installing Microsoft.EntityFrameworkCore 9.0.17...
+```
+
 ---
 
 ### CLI Options
 
 ```
-nuget-compat-assistant install <PackageId> [options]
+nuget-compat-assistant install <PackageId> [<PackageId>...] [options]
 
 Arguments:
-  PackageId                  The NuGet package ID (e.g. Microsoft.EntityFrameworkCore)
+  PackageId                  One or more NuGet package IDs
+                             (e.g. Microsoft.EntityFrameworkCore Serilog AutoMapper)
 
 Options:
   --project, -p <path>       Path to .csproj (auto-detects in current directory if omitted)
-  --version, -v <version>    Check a specific version's compatibility instead of auto-resolving
+  --version, -v <version>    Check a specific version's compatibility (single-package only)
   --yes, -y                  Skip confirmation prompt and install immediately
   --dry-run                  Only show the recommendation; never install
 
@@ -121,6 +164,12 @@ Options:
 ```bash
 # Dry-run: show recommendation without installing
 nuget-compat-assistant install Microsoft.EntityFrameworkCore --dry-run
+
+# Batch install: resolve and install multiple packages at once
+nuget-compat-assistant install AutoMapper Serilog Microsoft.EntityFrameworkCore
+
+# Batch dry-run: see the summary table without installing
+nuget-compat-assistant install AutoMapper Serilog Microsoft.EntityFrameworkCore --dry-run
 
 # Specify the project file explicitly
 nuget-compat-assistant install Serilog --project ./src/MyApi/MyApi.csproj
@@ -142,7 +191,7 @@ nuget-compat-assistant --report --project ./src/MyApi/MyApi.csproj
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│        Smart NuGet Compatibility Assistant  v1.0             │
+│        Smart NuGet Compatibility Assistant  v1.1.0           │
 └─────────────────────────────────────────────────────────────┘
 
 Project : SampleApp.csproj
@@ -196,13 +245,16 @@ Wraps `HttpClient` calls to the NuGet v3 REST API. Starts by reading the **NuGet
 The core logic class. Uses `NuGet.Frameworks.DefaultCompatibilityProvider` to test whether the project's TFM can satisfy each package version's declared TFMs. Sorts compatible versions using `NuGet.Versioning.NuGetVersion` (the official semver comparison) and returns the highest compatible version alongside metadata for explanation (whether the latest was compatible, what TFMs the latest declares, etc.).
 
 ### `ExplanationGenerator`
-A static utility that converts a `CompatibilityResult` into coloured terminal output. Generates two styles of explanation: "latest is fine" (green) and "latest is incompatible — here's why, and here's what we picked instead" (yellow warning + green recommendation). Also produces compact report rows for `--report` mode.
+A static utility that converts a `CompatibilityResult` into coloured terminal output. Generates two styles of explanation: "latest is fine" (green) and "latest is incompatible — here's why, and here's what we picked instead" (yellow warning + green recommendation). Also produces compact report rows for `--report` mode, and a summary table for batch install results (v1.1+).
+
+### `BatchInstallOrchestrator` *(v1.1+)*
+Orchestrates batch package resolution and installation. Accepts a fetch function and a `CompatibilityResolver` via constructor injection (using `Func<>` delegates), making it fully testable without mocking frameworks or real network calls. Resolves each package independently and collects results into `BatchPackageResult` records.
 
 ### `InstallRunner`
-Optionally prompts for `y/N` confirmation, then shells out to `dotnet add package {id} --version {version}` using `System.Diagnostics.Process`, streaming stdout and stderr live to the terminal. Never touches the `.csproj` XML directly — always delegates to the official dotnet CLI so the real NuGet resolver handles the actual package graph.
+Optionally prompts for `y/N` confirmation, then shells out to `dotnet add package {id} --version {version}` using `System.Diagnostics.Process`, streaming stdout and stderr live to the terminal. Never touches the `.csproj` XML directly — always delegates to the official dotnet CLI so the real NuGet resolver handles the actual package graph. In batch mode (v1.1+), the prompt-free `InstallPackageAsync` method is used instead, with the batch handler managing its own single confirmation prompt.
 
 ### `Program.cs`
-The CLI entry point using `System.CommandLine`. Wires up the `install <PackageId>` sub-command and the `--report` root flag, then orchestrates the pipeline: read project → query NuGet → resolve → explain → (optionally) install.
+The CLI entry point using `System.CommandLine`. Wires up the `install <PackageId> [<PackageId>...]` sub-command and the `--report` root flag. For a single package, uses the original v1.0 code path. For multiple packages (v1.1+), dispatches to `RunBatchInstallAsync` which orchestrates: read project → resolve all → summary table → prompt → install.
 
 ---
 
@@ -248,6 +300,31 @@ dotnet run --project src/NuGetCompatAssistant.Cli -- install Microsoft.EntityFra
 - **Private feed support**: Support authenticated NuGet feeds (Azure Artifacts, GitHub Packages, Nexus) via NuGet credential providers or explicit PAT flags.
 - **Pre-release version support**: Add a `--pre-release` flag to include pre-release packages in the compatibility search.
 - **Team policy config**: A `.nugetcompat.json` file per repo that pins allowed version ranges, enforces TFM-specific policies, and blocks known-bad versions.
+
+---
+
+## What's New
+
+### v1.1.0 — Multi-Package Batch Install
+
+- **Batch install**: Pass multiple package IDs in a single command:  
+  `nuget-compat-assistant install AutoMapper Serilog Microsoft.EntityFrameworkCore`
+- Each package is resolved independently against your project's TFM using the existing compatibility logic.
+- A summary table shows the status of every package (Compatible, Downgrade, Not Found, No Compatible Version) before anything is installed.
+- `--dry-run` stops after the summary table — no prompt, no installation.
+- A single confirmation prompt (`Install N package(s)? (y/n)`) replaces per-package prompts.
+- Sequential installation with progress display (`[1/3] Installing AutoMapper 16.1.1...`).
+- Final summary shows total requested, installed, failed, and skipped counts.
+- Exit code 0 only when every installation succeeds; exit code 1 if any fails.
+- **100% backward compatible**: single-package usage follows the exact same v1.0 code path.
+- 13 new unit tests covering all batch scenarios (49 total, up from 36).
+
+### v1.0.0 — Initial Release
+
+- Single-package compatibility resolution with NuGet's official framework compatibility logic.
+- `--dry-run`, `--yes`, `--version`, `--report` support.
+- Detailed plain-English explanations for every recommendation.
+- Full compatibility report for all packages already referenced in a project.
 
 ---
 

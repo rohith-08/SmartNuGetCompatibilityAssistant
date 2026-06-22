@@ -59,8 +59,43 @@ public class InstallRunner
         {
             var prevColor = Console.ForegroundColor;
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"✗ Installation failed (dotnet exited with code {exitCode}).");
+            Console.WriteLine($"✗ Failed to install {packageId}: dotnet exited with code {exitCode}.");
             Console.ForegroundColor = prevColor;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Installs a package without any interactive prompts or verbose headers.
+    /// Used by the batch install flow, which handles its own confirmation and progress display.
+    /// </summary>
+    /// <param name="packageId">The NuGet package ID to install.</param>
+    /// <param name="version">The specific version to install.</param>
+    /// <param name="csprojPath">Path to the .csproj to add the package to.</param>
+    /// <returns>True if the install succeeded; false otherwise.</returns>
+    public async Task<bool> InstallPackageAsync(
+        string packageId,
+        string version,
+        string csprojPath)
+    {
+        Console.WriteLine($"  Running: dotnet add \"{csprojPath}\" package {packageId} --version {version}");
+
+        var exitCode = await RunDotnetAddPackageAsync(packageId, version, csprojPath);
+
+        if (exitCode == 0)
+        {
+            var prev = Console.ForegroundColor;
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"  ✔ Successfully installed {packageId} {version}");
+            Console.ForegroundColor = prev;
+            return true;
+        }
+        else
+        {
+            var prev = Console.ForegroundColor;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  ✗ Failed to install {packageId}: dotnet exited with code {exitCode}.");
+            Console.ForegroundColor = prev;
             return false;
         }
     }

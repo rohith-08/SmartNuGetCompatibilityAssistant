@@ -38,21 +38,83 @@ public class ProjectReader
                 "Please specify the project explicitly using the --project <path> option.");
         }
 
-        Console.WriteLine("Multiple .csproj files found. Please select one:");
-        for (int i = 0; i < files.Length; i++)
+        var classified = files
+            .Select(f => new { Path = f, Type = ClassifyProject(f) })
+            .OrderBy(item => item.Type switch
+            {
+                ProjectType.Application => 0,
+                ProjectType.Library => 1,
+                ProjectType.Cli => 2,
+                ProjectType.Test => 3,
+                _ => 4
+            })
+            .ThenBy(item => Path.GetFileName(item.Path))
+            .ToList();
+
+        var appProjects = classified.Where(c => c.Type == ProjectType.Application).ToList();
+        int? recommendedIndex = null;
+        if (appProjects.Count == 1)
         {
-            var relativePath = Path.GetRelativePath(dir, files[i]);
-            Console.WriteLine($"  [{i + 1}] {relativePath}");
+            var recommendedPath = appProjects[0].Path;
+            for (int i = 0; i < classified.Count; i++)
+            {
+                if (classified[i].Path == recommendedPath)
+                {
+                    recommendedIndex = i + 1;
+                    break;
+                }
+            }
         }
-        
+
+        Console.WriteLine("Detected projects:");
+        Console.WriteLine();
+        for (int i = 0; i < classified.Count; i++)
+        {
+            var item = classified[i];
+            var filenameWithoutExt = Path.GetFileNameWithoutExtension(item.Path);
+            var typeLabel = item.Type switch
+            {
+                ProjectType.Application => "Application Project",
+                ProjectType.Library => "Library Project",
+                ProjectType.Cli => "CLI Project",
+                ProjectType.Test => "Test Project",
+                _ => "Project"
+            };
+
+            int displayIndex = i + 1;
+            if (recommendedIndex.HasValue && recommendedIndex.Value == displayIndex)
+            {
+                Console.WriteLine($"  ⭐ [{displayIndex}] {filenameWithoutExt} (Application Project - Recommended)");
+            }
+            else
+            {
+                Console.WriteLine($"    [{displayIndex}] {filenameWithoutExt} ({typeLabel})");
+            }
+        }
+        Console.WriteLine();
+
         while (true)
         {
-            Console.Write($"Select a project (1-{files.Length}): ");
+            if (recommendedIndex.HasValue)
+            {
+                Console.Write($"Select project [{recommendedIndex.Value}]: ");
+            }
+            else
+            {
+                Console.Write("Select project: ");
+            }
+
             var input = Console.ReadLine();
-            if (int.TryParse(input, out int choice) && choice >= 1 && choice <= files.Length)
+            if (string.IsNullOrEmpty(input) && recommendedIndex.HasValue)
             {
                 Console.WriteLine();
-                return files[choice - 1];
+                return classified[recommendedIndex.Value - 1].Path;
+            }
+
+            if (int.TryParse(input, out int choice) && choice >= 1 && choice <= classified.Count)
+            {
+                Console.WriteLine();
+                return classified[choice - 1].Path;
             }
             Console.WriteLine("Invalid selection. Please enter a valid number.");
         }
@@ -180,7 +242,102 @@ public class ProjectReader
 
         return false;
     }
+
+    public static ProjectType ClassifyProject(string csprojPath)
+    {
+        try
+        {
+            var content = File.ReadAllText(csprojPath);
+            return ClassifyProjectContent(content, csprojPath);
+        }
+        catch
+        {
+            return ProjectType.Library;
+        }
+    }
+
+    public static ProjectType ClassifyProjectContent(string xmlContent, string csprojPath)
+    {
+        XDocument doc;
+        try
+        {
+            doc = XDocument.Parse(xmlContent);
+        }
+        catch
+        {
+            return ProjectType.Library;
+        }
+
+        // 1. Test Project Check
+        var isPackableElement = doc.Descendants("IsPackable").FirstOrDefault();
+        bool hasIsPackableFalse = isPackableElement != null && 
+                                  string.Equals(isPackableElement.Value.Trim(), "false", StringComparison.OrdinalIgnoreCase);
+
+        var packageRefs = doc.Descendants("PackageReference")
+            .Select(pr => pr.Attribute("Include")?.Value?.Trim() ?? string.Empty)
+            .Where(val => !string.IsNullOrEmpty(val))
+            .ToList();
+
+        bool hasTestPackages = packageRefs.Any(pr => 
+            string.Equals(pr, "Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(pr, "xunit", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(pr, "NUnit3TestAdapter", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(pr, "MSTest.TestAdapter", StringComparison.OrdinalIgnoreCase));
+
+        var filename = Path.GetFileNameWithoutExtension(csprojPath);
+        bool hasTestName = filename.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase) ||
+                           filename.EndsWith("Tests", StringComparison.OrdinalIgnoreCase) ||
+                           filename.EndsWith(".Test", StringComparison.OrdinalIgnoreCase) ||
+                           filename.EndsWith("Test", StringComparison.OrdinalIgnoreCase);
+
+        if (hasIsPackableFalse || hasTestPackages || hasTestName)
+        {
+            return ProjectType.Test;
+        }
+
+        // 2. CLI/Tool Project Check
+        var packAsToolElement = doc.Descendants("PackAsTool").FirstOrDefault();
+        bool isPackAsTool = packAsToolElement != null && 
+                             string.Equals(packAsToolElement.Value.Trim(), "true", StringComparison.OrdinalIgnoreCase);
+
+        if (isPackAsTool)
+        {
+            return ProjectType.Cli;
+        }
+
+        // 3. Application Project Check
+        var outputTypeElement = doc.Descendants("OutputType").FirstOrDefault();
+        bool isExe = outputTypeElement != null && 
+                     string.Equals(outputTypeElement.Value.Trim(), "Exe", StringComparison.OrdinalIgnoreCase);
+
+        var sdkAttr = doc.Root?.Attribute("Sdk")?.Value?.Trim() ?? string.Empty;
+        bool hasWebSdk = string.Equals(sdkAttr, "Microsoft.NET.Sdk.Web", StringComparison.OrdinalIgnoreCase);
+        bool hasWorkerSdk = string.Equals(sdkAttr, "Microsoft.NET.Sdk.Worker", StringComparison.OrdinalIgnoreCase);
+        bool hasRazorSdk = string.Equals(sdkAttr, "Microsoft.NET.Sdk.Razor", StringComparison.OrdinalIgnoreCase);
+        bool hasMauiSdk = string.Equals(sdkAttr, "Microsoft.NET.Sdk.Maui", StringComparison.OrdinalIgnoreCase);
+
+        var useMauiElement = doc.Descendants("UseMaui").FirstOrDefault();
+        bool useMaui = useMauiElement != null && 
+                       string.Equals(useMauiElement.Value.Trim(), "true", StringComparison.OrdinalIgnoreCase);
+
+        if (isExe || hasWebSdk || hasWorkerSdk || hasRazorSdk || hasMauiSdk || 
+            (string.Equals(sdkAttr, "Microsoft.NET.Sdk", StringComparison.OrdinalIgnoreCase) && useMaui))
+        {
+            return ProjectType.Application;
+        }
+
+        return ProjectType.Library;
+    }
 }
+
+public enum ProjectType
+{
+    Application,
+    Library,
+    Cli,
+    Test
+}
+
 
 /// <summary>
 /// Exception thrown by <see cref="ProjectReader"/> for user-facing error conditions.

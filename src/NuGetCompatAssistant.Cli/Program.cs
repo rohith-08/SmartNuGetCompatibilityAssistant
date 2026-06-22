@@ -1,4 +1,7 @@
 using System.CommandLine;
+using System.CommandLine.Builder;
+using System.CommandLine.Parsing;
+using System.CommandLine.Help;
 using NuGetCompatAssistant.Cli;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,9 +31,12 @@ var dryRunOption = new Option<bool>(
 // install <PackageId> [options]
 // ─────────────────────────────────────────────────────────────────────────────
 
-var packageIdArg = new Argument<string>(
+var packageIdArg = new Argument<string[]>(
     "PackageId",
-    "The NuGet package ID to install (e.g. Microsoft.EntityFrameworkCore).");
+    "One or more NuGet package IDs to install (e.g. Microsoft.EntityFrameworkCore Serilog AutoMapper).")
+{
+    Arity = ArgumentArity.OneOrMore
+};
 
 var versionOption = new Option<string?>(
     aliases: ["--version", "-v"],
@@ -48,9 +54,24 @@ var installCommand = new Command(
 };
 
 installCommand.SetHandler(
-    async (string packageId, string? projectPath, string? version, bool yes, bool dryRun) =>
+    async (string[] packageIds, string? projectPath, string? version, bool yes, bool dryRun) =>
     {
-        int code = await RunInstallAsync(packageId, projectPath, version, yes, dryRun);
+        int code;
+        if (packageIds.Length == 1)
+        {
+            // Single-package path — exact same behaviour as v1.0
+            code = await RunInstallAsync(packageIds[0], projectPath, version, yes, dryRun);
+        }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(version))
+            {
+                PrintError("The --version option cannot be used when installing multiple packages.");
+                Environment.Exit(1);
+                return;
+            }
+            code = await RunBatchInstallAsync(packageIds, projectPath, yes, dryRun);
+        }
         Environment.Exit(code);
     },
     packageIdArg, projectOption, versionOption, yesOption, dryRunOption);
@@ -88,7 +109,12 @@ if (!isVersionQuery)
     PrintBanner();
 }
 
-return await rootCommand.InvokeAsync(args);
+var parser = new CommandLineBuilder(rootCommand)
+    .UseDefaults()
+    .UseHelpBuilder(context => new CustomHelpBuilder())
+    .Build();
+
+return await parser.InvokeAsync(args);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Command handlers
@@ -401,6 +427,134 @@ static async Task<int> RunReportAsync(string? projectPath)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Batch install handler
+// ─────────────────────────────────────────────────────────────────────────────
+
+static async Task<int> RunBatchInstallAsync(
+    string[] packageIds,
+    string? projectPath,
+    bool yes,
+    bool dryRun)
+{
+    // 1. Resolve project file
+    string csprojPath;
+    try
+    {
+        csprojPath = projectPath is not null
+            ? Path.GetFullPath(projectPath)
+            : ProjectReader.FindCsprojInDirectory();
+    }
+    catch (ProjectReaderException ex)
+    {
+        PrintError(ex.Message);
+        return 1;
+    }
+
+    if (ProjectReader.IsCentralPackageManagementEnabled(csprojPath))
+    {
+        PrintError("Central Package Management detected. This version does not yet support Directory.Packages.props.");
+        return 1;
+    }
+
+    // 2. Read TFMs (only once)
+    List<string> tfms;
+    try
+    {
+        tfms = ProjectReader.ReadTargetFrameworks(csprojPath);
+    }
+    catch (ProjectReaderException ex)
+    {
+        PrintError(ex.Message);
+        return 1;
+    }
+
+    Console.WriteLine($"Project : {Path.GetFileName(csprojPath)}");
+    Console.WriteLine($"TFM(s)  : {string.Join(", ", tfms)}");
+    Console.WriteLine();
+
+    string projectTfm;
+    if (tfms.Count > 1)
+    {
+        Console.WriteLine($"Note: Multi-targeting detected ({string.Join(", ", tfms)}).");
+        Console.WriteLine($"      Resolving for primary TFM: {tfms[0]}");
+        Console.WriteLine();
+        projectTfm = tfms[0];
+    }
+    else
+    {
+        projectTfm = tfms[0];
+    }
+
+    // 3. Resolve all packages
+    Console.WriteLine($"Resolving {packageIds.Length} package(s)…");
+    Console.WriteLine();
+
+    using var nugetClient = new NuGetClient();
+    var resolver = new CompatibilityResolver();
+    var orchestrator = new BatchInstallOrchestrator(
+        nugetClient.GetAllVersionsAsync, resolver);
+
+    var results = await orchestrator.ResolveAllAsync(packageIds, projectTfm);
+
+    // 4. Display summary table
+    ExplanationGenerator.PrintBatchSummaryTable(results);
+
+    // 5. Handle dry-run
+    if (dryRun)
+    {
+        PrintColored("Dry-run mode — nothing was installed.", ConsoleColor.Cyan);
+        Console.WriteLine();
+        return 0;
+    }
+
+    // 6. Filter installable packages
+    var installable = results.Where(r => r.IsInstallable).ToList();
+    if (installable.Count == 0)
+    {
+        PrintColored("No installable packages found.", ConsoleColor.Yellow);
+        Console.WriteLine();
+        return 1;
+    }
+
+    // 7. Prompt once for all packages
+    if (!yes)
+    {
+        Console.Write($"Install {installable.Count} package(s)? [y/N] ");
+        var answer = Console.ReadLine()?.Trim().ToLowerInvariant();
+        if (answer is not ("y" or "yes"))
+        {
+            Console.WriteLine("Installation cancelled.");
+            return 0;
+        }
+    }
+
+    Console.WriteLine();
+
+    // 8. Install sequentially using the existing InstallRunner
+    var runner = new InstallRunner();
+    var (installed, failed) = await BatchInstallOrchestrator.InstallAllAsync(
+        installable,
+        csprojPath,
+        runner.InstallPackageAsync);
+
+    // 9. Final summary
+    int skipped = packageIds.Length - installable.Count;
+    Console.WriteLine();
+    Console.WriteLine(new string('─', 60));
+    Console.WriteLine($"  Total requested : {packageIds.Length}");
+    PrintColored($"  Installed       : {installed}",
+        installed > 0 ? ConsoleColor.Green : ConsoleColor.Gray);
+    PrintColored($"  Failed          : {failed}",
+        failed > 0 ? ConsoleColor.Red : ConsoleColor.Gray);
+    PrintColored($"  Skipped         : {skipped}",
+        skipped > 0 ? ConsoleColor.Yellow : ConsoleColor.Gray);
+    Console.WriteLine(new string('─', 60));
+    Console.WriteLine();
+
+    return failed > 0 ? 1 : 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Utility helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -446,4 +600,20 @@ static void PrintColored(string message, ConsoleColor color)
     Console.ForegroundColor = color;
     Console.WriteLine(message);
     Console.ForegroundColor = prev;
+}
+
+internal class CustomHelpBuilder : HelpBuilder
+{
+    public CustomHelpBuilder() : base(LocalizationResources.Instance) {}
+
+    public override void Write(HelpContext context)
+    {
+        using var stringWriter = new StringWriter();
+        var newContext = new HelpContext(this, context.Command, stringWriter, context.ParseResult);
+        base.Write(newContext);
+
+        var output = stringWriter.ToString();
+        var modified = output.Replace("<PackageId>...", "<PackageId> [<PackageId>...]");
+        context.Output.Write(modified);
+    }
 }

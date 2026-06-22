@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <PackageId>nuget-compat-assistant</PackageId>
-    <Version>1.0.2</Version>
+    <Version>1.2.0</Version>
     <Authors>NuGet Compat Assistant</Authors>
     <Description>A smart CLI tool that finds the best compatible NuGet package version for your project's target framework.</Description>
     <PackageTags>nuget;compatibility;dotnet;tool;cli</PackageTags>

@@ -141,6 +141,58 @@ public static class ExplanationGenerator
         }
     }
 
+    /// <summary>
+    /// Prints a formatted summary table for batch install results.
+    /// Does not modify the existing single-package explanation methods.
+    /// </summary>
+    public static void PrintBatchSummaryTable(List<BatchPackageResult> results)
+    {
+        int maxPkgLen = results.Count > 0 ? results.Max(r => r.PackageId.Length) : 0;
+        int pkgColWidth = Math.Max(39, maxPkgLen);
+        int tableWidth = 130 + (pkgColWidth - 39);
+
+        string headerFmt = " {0,-" + (pkgColWidth + 2) + "} {1,-18} {2,-18} {3,-22} {4}";
+        string rowFmt = "{0,-" + pkgColWidth + "} {1,-18} {2,-18} {3,-22} {4}";
+
+        Console.WriteLine(new string('─', tableWidth));
+        Console.WriteLine(string.Format(headerFmt,
+            "Package", "Latest Stable", "Recommended", "Status", "Reason"));
+        Console.WriteLine(new string('─', tableWidth));
+
+        foreach (var r in results)
+        {
+            var color = r.Status switch
+            {
+                "Compatible" => ConsoleColor.Green,
+                "Downgrade" => ConsoleColor.Yellow,
+                "Not Found" => ConsoleColor.Red,
+                "No Compatible Version" => ConsoleColor.Red,
+                _ => ConsoleColor.Gray,
+            };
+
+            var statusIcon = r.Status switch
+            {
+                "Compatible" => "✔",
+                "Downgrade" => "⚠",
+                "Not Found" => "✗",
+                "No Compatible Version" => "✗",
+                _ => "?",
+            };
+
+            PrintColored($" {statusIcon} ", color, newline: false);
+            Console.Write(string.Format(rowFmt,
+                r.PackageId,
+                r.LatestStableVersion,
+                r.RecommendedVersion,
+                r.Status,
+                r.Reason));
+            Console.WriteLine();
+        }
+
+        Console.WriteLine(new string('─', tableWidth));
+        Console.WriteLine();
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
